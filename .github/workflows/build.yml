@@ -1,104 +1,122 @@
-name: auto build engine
+name: Build Magisk with zygote64_32
 
-on: 
-  release:
-    types: [published]
+on:
   schedule:
-    - cron: "0 16 * * *"
-  push:
-    branches: 
-      - master
-  watch:
-    types: [started]
-   
+    - cron: '0 12 * * *'  # Check daily at noon UTC
+  workflow_dispatch:       # Manual trigger button in GitHub UI
+    inputs:
+      force_build:
+        description: 'Force rebuild even if no new release'
+        type: boolean
+        default: false
+
 jobs:
   build:
-    name: Build Magisk
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
-      - name: Check out
-        uses: actions/checkout@main
-        with:
-          repository: "topjohnwu/Magisk"
-          #ref: "0d9ec0931b98c930bf24bb5c52723e6d0a5ebdf4"
-          ref: ""
-          submodules: "recursive"
-          fetch-depth: 0
+      - name: Checkout this repo
+        uses: actions/checkout@v4
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@main
-        with:
-          distribution: "temurin"
-          java-version: "21"
+      - name: Check for new Magisk release
+        id: check
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | jq -r '.tag_name')
+          echo "Latest Magisk release: $LATEST"
 
-      - name: Set up Python 3
-        uses: actions/setup-python@main
+          CURRENT="none"
+          if [ -f last_built_tag ]; then
+            CURRENT=$(cat last_built_tag)
+          fi
+          echo "Last built against: $CURRENT"
+
+          FORCE="${{ github.event.inputs.force_build }}"
+
+          if [ "$LATEST" = "$CURRENT" ] && [ "$FORCE" != "true" ]; then
+            echo "No new release. Skipping build."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "New release found or force build requested."
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "tag=$LATEST" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up JDK 17
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/setup-java@v4
         with:
-          python-version: "3.x"
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Python
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Clone Magisk
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git clone --recurse-submodules https://github.com/topjohnwu/Magisk.git magisk-src
+          cd magisk-src
+          git checkout ${{ steps.check.outputs.tag }}
+          git submodule update --init --recursive
+
+      - name: Apply zygote64_32 patch
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cd magisk-src
+          echo "Attempting to apply patch..."
+          if git apply --check ../zygote64_32.patch 2>&1; then
+            git apply ../zygote64_32.patch
+            echo "Patch applied cleanly."
+          else
+            echo "::error::Patch failed to apply. rootdir.cpp has likely changed upstream."
+            echo "::error::The patch needs to be updated for Magisk ${{ steps.check.outputs.tag }}"
+            exit 1
+          fi
 
       - name: Set up NDK
-        run: python build.py -v ndk
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cd magisk-src
+          python build.py -v ndk
 
-      - name: Patch
+      - name: Build Magisk
+        if: steps.check.outputs.skip != 'true'
         run: |
-          wget --no-check-certificate https://raw.githubusercontent.com/ActiveIce/Magisk_zygote64_32/master/zygote64_32.patch -O zygote64_32.patch
-          git apply zygote64_32.patch --reject
-  
-      - name: Config
-        run: |
-          echo ${{ secrets.KEYSTORE }} | base64 --decode > keystore.jks
-          echo keyStore=keystore.jks >> config.prop
-          echo keyStorePass=${{ secrets.KEYSTOREPASS }} >> config.prop
-          echo keyAlias=${{ secrets.KEYALIAS }} >> config.prop
-          echo keyPass=${{ secrets.KEYPASS }} >> config.prop
-
-      - name: Build release
-        run: |
+          cd magisk-src
           python build.py -vr all
 
-      - name: Update canary
+      - name: Collect build output
+        if: steps.check.outputs.skip != 'true'
         run: |
-          rev=$(git rev-parse --short=8 HEAD)
-          link=https://raw.githubusercontent.com/ActiveIce/Magisk_zygote64_32/master/
-          wget --no-check-certificate https://raw.githubusercontent.com/topjohnwu/magisk-files/master/canary.json -O out/canary.json
-          sed -i "s#\"version\": \".*\"#\"version\": \"${rev}\"#" out/canary.json
-          sed -i "s#\"link\": \".*app-release.apk\"#\"link\": \"${link}app-release.apk\"#g" out/canary.json
-          sed -i "s#\"link\": \".*stub-release.apk\"#\"link\": \"${link}stub-release.apk\"#g" out/canary.json
+          cp magisk-src/out/app-release.apk app-release.apk
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@main
-        with:
-          name: magisk
-          path: |
-            out/app-release.apk
-            out/stub-release.apk
-            out/canary.json
+          # Update the tag tracker
+          echo "${{ steps.check.outputs.tag }}" > last_built_tag
 
-  push:
-    needs: build
-    runs-on: ubuntu-24.04
-    
-    steps:
-    - name: Checkout
-      uses: actions/checkout@main
-    
-    - name: Clean
-      run: |
-        rm *.apk *.json
-    
-    - name: Download artifact
-      uses: actions/download-artifact@main
-      with:
-        name: magisk
-        path: ./
-    
-    - name: Commit
-      run: |
-        git config --global user.email "actions@github.com"
-        git config --global user.name "GitHub Actions"
-        git checkout --orphan new_branch
-        git add -A
-        git commit -am "update new file"
-        git branch -D master
-        git branch -m master
-        git push origin master --force
+          # Update canary.json with version info
+          MAGISK_VER=$(echo "${{ steps.check.outputs.tag }}" | sed 's/v//')
+          MAGISK_VCODE=$(echo "$MAGISK_VER" | tr -d '.')
+          cat > canary.json << EOF
+          {
+            "magisk": {
+              "version": "${MAGISK_VER}-zygote64_32",
+              "versionCode": "${MAGISK_VCODE}",
+              "link": "https://raw.githubusercontent.com/${{ github.repository }}/master/app-release.apk",
+              "note": "https://github.com/${{ github.repository }}/blob/master/README.md"
+            }
+          }
+          EOF
+
+      - name: Commit and push
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add app-release.apk last_built_tag canary.json
+          git commit -m "Build Magisk ${{ steps.check.outputs.tag }} with zygote64_32 patch"
+          git push
