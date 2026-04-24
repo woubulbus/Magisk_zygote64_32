@@ -1,8 +1,8 @@
 {
   "magisk": {
-    "version": "9d0b5298",
-    "versionCode": "30600",
-    "link": "https://github.com/topjohnwu/Magisk/releases/download/v30.6/Magisk-v30.6.apk",
-    "note": "https://github.com/topjohnwu/Magisk/releases/download/v30.6/notes.md"
+    "version": "30.7-zygote64_32",
+    "versionCode": "307",
+    "link": "https://raw.githubusercontent.com/woubulbus/Magisk_zygote64_32/master/app-release.apk",
+    "note": "https://github.com/woubulbus/Magisk_zygote64_32/blob/master/README.md"
   }
 }
